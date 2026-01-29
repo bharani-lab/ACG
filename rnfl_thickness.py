@@ -83,6 +83,53 @@ def predict_mask(model: nn.Module, image_tensor: torch.Tensor) -> np.ndarray:
     return mask
 
 
+def box_filter_1d(data: np.ndarray, axis: int, kernel_size: int) -> np.ndarray:
+    if kernel_size <= 1:
+        return data
+    pad = kernel_size // 2
+    pad_width = [(0, 0)] * data.ndim
+    pad_width[axis] = (pad, pad)
+    padded = np.pad(data, pad_width, mode="edge")
+    cumsum = np.cumsum(padded, axis=axis)
+    slice_start = [slice(None)] * data.ndim
+    slice_end = [slice(None)] * data.ndim
+    slice_start[axis] = slice(0, -kernel_size)
+    slice_end[axis] = slice(kernel_size, None)
+    window_sum = cumsum[tuple(slice_end)] - cumsum[tuple(slice_start)]
+    return window_sum / float(kernel_size)
+
+
+def smooth_image(image: np.ndarray, kernel_size: int) -> np.ndarray:
+    smoothed = box_filter_1d(image, axis=0, kernel_size=kernel_size)
+    smoothed = box_filter_1d(smoothed, axis=1, kernel_size=kernel_size)
+    return smoothed
+
+
+def predict_mask_heuristic(
+    image: np.ndarray,
+    search_top_fraction: float,
+    min_thickness_px: int,
+    max_thickness_px: int,
+    smoothing_kernel: int,
+) -> np.ndarray:
+    height, width = image.shape
+    smoothed = smooth_image(image, smoothing_kernel)
+    grad = np.diff(smoothed, axis=0)
+    top_limit = max(1, int(height * search_top_fraction))
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    for col in range(width):
+        ilm_idx = int(np.argmax(grad[:top_limit, col]))
+        start = ilm_idx + min_thickness_px
+        end = min(ilm_idx + max_thickness_px, height - 2)
+        if start >= end:
+            continue
+        rnfl_bottom = start + int(np.argmin(grad[start:end, col]))
+        mask[ilm_idx : rnfl_bottom + 1, col] = 1
+
+    return mask
+
+
 def compute_thickness(mask: np.ndarray, microns_per_pixel: float) -> ThicknessResult:
     height, width = mask.shape
     per_column = np.zeros(width, dtype=np.float32)
@@ -111,7 +158,13 @@ def write_csv(path: Path, result: ThicknessResult) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute RNFL thickness from OCT images.")
     parser.add_argument("--image", type=Path, required=True, help="Path to OCT B-scan image.")
-    parser.add_argument("--weights", type=Path, required=True, help="Path to PyTorch weights.")
+    parser.add_argument(
+        "--method",
+        choices=["unet", "heuristic"],
+        default="unet",
+        help="Segmentation method to use.",
+    )
+    parser.add_argument("--weights", type=Path, help="Path to PyTorch weights for U-Net.")
     parser.add_argument(
         "--microns-per-pixel",
         type=float,
@@ -119,6 +172,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Microns per pixel from OCT device metadata.",
     )
     parser.add_argument("--output", type=Path, required=True, help="Output CSV path.")
+    parser.add_argument(
+        "--search-top-fraction",
+        type=float,
+        default=0.4,
+        help="Fraction of image height to search for the ILM boundary (heuristic).",
+    )
+    parser.add_argument(
+        "--min-thickness-px",
+        type=int,
+        default=2,
+        help="Minimum RNFL thickness in pixels for heuristic segmentation.",
+    )
+    parser.add_argument(
+        "--max-thickness-px",
+        type=int,
+        default=80,
+        help="Maximum RNFL thickness in pixels for heuristic segmentation.",
+    )
+    parser.add_argument(
+        "--smoothing-kernel",
+        type=int,
+        default=5,
+        help="Smoothing kernel size for heuristic segmentation.",
+    )
     return parser
 
 
@@ -129,10 +206,20 @@ def main() -> None:
     image = load_image(args.image)
     tensor = preprocess(image)
 
-    model = UNet(in_channels=1, out_channels=1)
-    model.load_state_dict(torch.load(args.weights, map_location="cpu"))
-
-    mask = predict_mask(model, tensor)
+    if args.method == "unet":
+        if args.weights is None:
+            raise SystemExit("--weights is required when using --method unet.")
+        model = UNet(in_channels=1, out_channels=1)
+        model.load_state_dict(torch.load(args.weights, map_location="cpu"))
+        mask = predict_mask(model, tensor)
+    else:
+        mask = predict_mask_heuristic(
+            image,
+            search_top_fraction=args.search_top_fraction,
+            min_thickness_px=args.min_thickness_px,
+            max_thickness_px=args.max_thickness_px,
+            smoothing_kernel=args.smoothing_kernel,
+        )
     result = compute_thickness(mask, args.microns_per_pixel)
     write_csv(args.output, result)
 
