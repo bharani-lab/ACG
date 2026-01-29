@@ -42,6 +42,22 @@ python glaucoma_features.py rnfl-unet \
   --output-mask rnfl_mask.png
 ```
 
+### 4) Automatic mask generation (heuristic)
+If you do not have pretrained models, you can generate rough masks automatically. These are
+heuristic estimates and should be reviewed before clinical use.
+
+```bash
+python glaucoma_features.py fundus-auto \
+  --image fundus.png \
+  --output-dir fundus_masks
+```
+
+```bash
+python glaucoma_features.py oct-auto \
+  --image oct.png \
+  --output-dir oct_masks
+```
+
 ## Inputs
 ### Fundus mode
 - `--disc-mask`: Binary optic disc mask.
@@ -61,6 +77,11 @@ python glaucoma_features.py rnfl-unet \
 - `--bmo-points`: CSV with BMO points (x,y per line; optional).
 - `--microns-per-pixel`: Physical spacing in microns per pixel.
 - `--output`: CSV path for features.
+
+### Automatic mask generation
+- `fundus-auto` outputs `disc_mask.png`, `cup_mask.png`, `vessel_mask.png`.
+- `oct-auto` outputs `ilm_mask.png`, `rnfl_mask.png`.
+- These masks are heuristic and should be validated against manual labels when possible.
 
 ## What is a mask?
 A **mask** is a binary (black/white) image where pixels that belong to a structure of interest

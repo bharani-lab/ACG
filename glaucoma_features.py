@@ -2,7 +2,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -81,6 +81,28 @@ def preprocess(image: np.ndarray) -> torch.Tensor:
     return tensor
 
 
+def box_filter_1d(data: np.ndarray, axis: int, kernel_size: int) -> np.ndarray:
+    if kernel_size <= 1:
+        return data
+    pad = kernel_size // 2
+    pad_width = [(0, 0)] * data.ndim
+    pad_width[axis] = (pad, pad)
+    padded = np.pad(data, pad_width, mode="edge")
+    cumsum = np.cumsum(padded, axis=axis)
+    slice_start = [slice(None)] * data.ndim
+    slice_end = [slice(None)] * data.ndim
+    slice_start[axis] = slice(0, -kernel_size)
+    slice_end[axis] = slice(kernel_size, None)
+    window_sum = cumsum[tuple(slice_end)] - cumsum[tuple(slice_start)]
+    return window_sum / float(kernel_size)
+
+
+def smooth_image(image: np.ndarray, kernel_size: int) -> np.ndarray:
+    smoothed = box_filter_1d(image, axis=0, kernel_size=kernel_size)
+    smoothed = box_filter_1d(smoothed, axis=1, kernel_size=kernel_size)
+    return smoothed
+
+
 def predict_mask(model: nn.Module, image_tensor: torch.Tensor) -> np.ndarray:
     model.eval()
     with torch.no_grad():
@@ -88,6 +110,97 @@ def predict_mask(model: nn.Module, image_tensor: torch.Tensor) -> np.ndarray:
         probs = torch.sigmoid(logits)
     mask = (probs.squeeze(0).squeeze(0).cpu().numpy() > 0.5).astype(np.uint8)
     return mask
+
+
+def largest_connected_component(mask: np.ndarray) -> np.ndarray:
+    visited = np.zeros_like(mask, dtype=bool)
+    best_component: List[Tuple[int, int]] = []
+    height, width = mask.shape
+
+    for y in range(height):
+        for x in range(width):
+            if mask[y, x] == 0 or visited[y, x]:
+                continue
+            stack = [(y, x)]
+            visited[y, x] = True
+            component: List[Tuple[int, int]] = []
+            while stack:
+                cy, cx = stack.pop()
+                component.append((cy, cx))
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        ny, nx = cy + dy, cx + dx
+                        if 0 <= ny < height and 0 <= nx < width:
+                            if mask[ny, nx] > 0 and not visited[ny, nx]:
+                                visited[ny, nx] = True
+                                stack.append((ny, nx))
+            if len(component) > len(best_component):
+                best_component = component
+
+    output = np.zeros_like(mask, dtype=np.uint8)
+    for y, x in best_component:
+        output[y, x] = 1
+    return output
+
+
+def auto_fundus_masks(
+    image: np.ndarray,
+    disc_percentile: float,
+    cup_percentile: float,
+    vessel_percentile: float,
+    smooth_kernel: int,
+) -> Dict[str, np.ndarray]:
+    smoothed = smooth_image(image, smooth_kernel)
+    disc_threshold = np.percentile(smoothed, disc_percentile)
+    disc_mask = (smoothed >= disc_threshold).astype(np.uint8)
+    disc_mask = largest_connected_component(disc_mask)
+
+    cup_threshold = np.percentile(smoothed[disc_mask > 0], cup_percentile) if np.any(disc_mask) else 1.0
+    cup_mask = ((smoothed >= cup_threshold) & (disc_mask > 0)).astype(np.uint8)
+
+    background = smooth_image(image, smooth_kernel * 3)
+    vessel_response = background - image
+    vessel_threshold = np.percentile(vessel_response, vessel_percentile)
+    vessel_mask = (vessel_response >= vessel_threshold).astype(np.uint8)
+
+    return {
+        "disc": disc_mask,
+        "cup": cup_mask,
+        "vessel": vessel_mask,
+    }
+
+
+def auto_oct_masks(
+    image: np.ndarray,
+    search_top_fraction: float,
+    min_thickness_px: int,
+    max_thickness_px: int,
+    smoothing_kernel: int,
+) -> Dict[str, np.ndarray]:
+    height, width = image.shape
+    smoothed = smooth_image(image, smoothing_kernel)
+    grad = np.diff(smoothed, axis=0)
+    top_limit = max(1, int(height * search_top_fraction))
+
+    ilm_mask = np.zeros((height, width), dtype=np.uint8)
+    rnfl_mask = np.zeros((height, width), dtype=np.uint8)
+
+    for col in range(width):
+        ilm_idx = int(np.argmax(grad[:top_limit, col]))
+        start = ilm_idx + min_thickness_px
+        end = min(ilm_idx + max_thickness_px, height - 2)
+        if start >= end:
+            continue
+        rnfl_bottom = start + int(np.argmin(grad[start:end, col]))
+        ilm_mask[ilm_idx, col] = 1
+        rnfl_mask[ilm_idx : rnfl_bottom + 1, col] = 1
+
+    return {
+        "ilm": ilm_mask,
+        "rnfl": rnfl_mask,
+    }
 
 
 def compute_thickness(mask: np.ndarray, microns_per_pixel: float) -> ThicknessResult:
@@ -379,6 +492,32 @@ def build_parser() -> argparse.ArgumentParser:
     unet_parser.add_argument("--weights", type=Path, required=True, help="Path to U-Net weights.")
     unet_parser.add_argument("--output-mask", type=Path, required=True, help="Output RNFL mask path.")
 
+    auto_fundus = subparsers.add_parser("fundus-auto", help="Auto-generate fundus masks.")
+    auto_fundus.add_argument("--image", type=Path, required=True, help="Fundus image.")
+    auto_fundus.add_argument("--output-dir", type=Path, required=True, help="Directory to save masks.")
+    auto_fundus.add_argument("--disc-percentile", type=float, default=85.0, help="Percentile for disc mask.")
+    auto_fundus.add_argument("--cup-percentile", type=float, default=95.0, help="Percentile for cup mask.")
+    auto_fundus.add_argument(
+        "--vessel-percentile",
+        type=float,
+        default=95.0,
+        help="Percentile for vessel mask response.",
+    )
+    auto_fundus.add_argument("--smoothing-kernel", type=int, default=11, help="Smoothing kernel size.")
+
+    auto_oct = subparsers.add_parser("oct-auto", help="Auto-generate OCT masks (ILM/RNFL).")
+    auto_oct.add_argument("--image", type=Path, required=True, help="OCT B-scan image.")
+    auto_oct.add_argument("--output-dir", type=Path, required=True, help="Directory to save masks.")
+    auto_oct.add_argument(
+        "--search-top-fraction",
+        type=float,
+        default=0.4,
+        help="Fraction of image height to search for the ILM boundary.",
+    )
+    auto_oct.add_argument("--min-thickness-px", type=int, default=2, help="Minimum RNFL thickness (px).")
+    auto_oct.add_argument("--max-thickness-px", type=int, default=80, help="Maximum RNFL thickness (px).")
+    auto_oct.add_argument("--smoothing-kernel", type=int, default=5, help="Smoothing kernel size.")
+
     return parser
 
 
@@ -429,6 +568,34 @@ def run_unet(args: argparse.Namespace) -> None:
     Image.fromarray((mask * 255).astype(np.uint8)).save(args.output_mask)
 
 
+def run_auto_fundus(args: argparse.Namespace) -> None:
+    image = load_grayscale_image(args.image)
+    masks = auto_fundus_masks(
+        image,
+        disc_percentile=args.disc_percentile,
+        cup_percentile=args.cup_percentile,
+        vessel_percentile=args.vessel_percentile,
+        smooth_kernel=args.smoothing_kernel,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for name, mask in masks.items():
+        Image.fromarray((mask * 255).astype(np.uint8)).save(args.output_dir / f\"{name}_mask.png\")
+
+
+def run_auto_oct(args: argparse.Namespace) -> None:
+    image = load_grayscale_image(args.image)
+    masks = auto_oct_masks(
+        image,
+        search_top_fraction=args.search_top_fraction,
+        min_thickness_px=args.min_thickness_px,
+        max_thickness_px=args.max_thickness_px,
+        smoothing_kernel=args.smoothing_kernel,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for name, mask in masks.items():
+        Image.fromarray((mask * 255).astype(np.uint8)).save(args.output_dir / f\"{name}_mask.png\")
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -437,6 +604,10 @@ def main() -> None:
         run_fundus(args)
     elif args.mode == "oct":
         run_oct(args)
+    elif args.mode == "fundus-auto":
+        run_auto_fundus(args)
+    elif args.mode == "oct-auto":
+        run_auto_oct(args)
     else:
         run_unet(args)
 
