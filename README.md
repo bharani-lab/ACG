@@ -62,6 +62,20 @@ python glaucoma_features.py rnfl-unet \
 - `--microns-per-pixel`: Physical spacing in microns per pixel.
 - `--output`: CSV path for features.
 
+## What is a mask?
+A **mask** is a binary (black/white) image where pixels that belong to a structure of interest
+are set to white (value > 0) and everything else is black (value = 0). In this pipeline, masks
+are used for structures like the optic disc, cup, vessels, or retinal layers (ILM, RNFL, GCL, IPL, RPE).
+
+### How do I create masks?
+You can create masks in three common ways:
+1. **Use a pretrained segmentation model** (recommended) to generate masks automatically.
+2. **Manual annotation** in tools like ImageJ/Fiji or ITK-SNAP, then export as PNG masks.
+3. **Semi-automatic tools** (thresholding + manual cleanup) for quick drafts.
+
+Mask images should be the **same resolution** as the original image and saved as PNG with
+white pixels for the target structure and black elsewhere.
+
 ## Feature outputs
 ### Fundus (en-face)
 - Cup-to-disc ratio (CDR)
