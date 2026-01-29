@@ -1,95 +1,80 @@
 # RNFL Thickness from OCT (Deep Learning Segmentation)
 
-This repository contains a minimal, reproducible pipeline to compute **retinal nerve fiber layer (RNFL) thickness** from OCT B-scans using a **published deep learning segmentation method** (U-Net-style architecture). The workflow is:
-
-1. **Segment RNFL** from OCT B-scan with a U-Net segmentation model (Ronneberger et al., 2015) or a heuristic fallback.
-2. **Extract RNFL boundaries** per A-scan (image column).
-3. **Compute thickness** from the boundary distance and pixel spacing.
-
-> **Note:** You must provide your own trained weights compatible with the included U-Net model. The script expects a binary RNFL mask output.
+This repository contains a minimal, reproducible pipeline to compute **retinal nerve fiber layer (RNFL) thickness** from OCT B-scans using a **published deep learning segmentation method** (U-Net-style architecture) and to extract common **glaucoma features** from fundus (en-face) and OCT images.
 
 ## Quick start
 
+### 1) Fundus (en-face) feature extraction
+Provide binary masks for disc/cup/vessels (from any segmentation model) and compute glaucoma features:
+
 ```bash
-python rnfl_thickness.py \
+python glaucoma_features.py fundus \
+  --disc-mask disc_mask.png \
+  --cup-mask cup_mask.png \
+  --vessel-mask vessel_mask.png \
+  --vessel-skeleton-mask vessel_skeleton.png \
+  --rnfl-defect-mask rnfl_defects.png \
+  --output fundus_features.csv
+```
+
+### 2) OCT B-scan feature extraction
+Provide layer masks and extract RNFL/GCC thickness and BMO-MRW:
+
+```bash
+python glaucoma_features.py oct \
+  --ilm-mask ilm_mask.png \
+  --rnfl-mask rnfl_mask.png \
+  --gcl-mask gcl_mask.png \
+  --ipl-mask ipl_mask.png \
+  --rpe-mask rpe_mask.png \
+  --bmo-points bmo_points.csv \
+  --microns-per-pixel 3.9 \
+  --output oct_features.csv
+```
+
+### 3) Optional U-Net RNFL mask prediction
+If you have a trained U-Net checkpoint, you can generate an RNFL mask from an OCT B-scan:
+
+```bash
+python glaucoma_features.py rnfl-unet \
   --image d2.PNG \
   --weights /path/to/unet_weights.pt \
-  --microns-per-pixel 3.9 \
-  --output rnfl_thickness.csv
+  --output-mask rnfl_mask.png
 ```
 
-```bash
-python rnfl_thickness.py \
-  --image d2.PNG \
-  --method heuristic \
-  --microns-per-pixel 3.9 \
-  --output rnfl_thickness.csv
-```
+## Inputs
+### Fundus mode
+- `--disc-mask`: Binary optic disc mask.
+- `--cup-mask`: Binary optic cup mask.
+- `--vessel-mask`: Binary vessel mask (optional).
+- `--vessel-skeleton-mask`: Binary vessel skeleton mask (optional; enables tortuosity).
+- `--rnfl-defect-mask`: Binary RNFL defect mask (optional).
+- `--annulus-scale`: Outer radius scale for peripapillary annulus (default 1.5).
+- `--output`: CSV path for features.
 
-### Inputs
-- `--image`: Path to OCT B-scan image (PNG/JPG).
-- `--method`: `unet` (default) or `heuristic` segmentation.
-- `--weights`: Path to PyTorch `.pt` weights for the included U-Net (required for `unet`).
-- `--microns-per-pixel`: Physical spacing in microns per pixel (from OCT device metadata).
-- `--output`: CSV file to save per-column thickness values and summary statistics.
+### OCT mode
+- `--ilm-mask`: Binary ILM mask.
+- `--rnfl-mask`: Binary RNFL mask (optional but recommended).
+- `--gcl-mask`: Binary GCL mask (optional).
+- `--ipl-mask`: Binary IPL mask (optional).
+- `--rpe-mask`: Binary RPE mask (optional).
+- `--bmo-points`: CSV with BMO points (x,y per line; optional).
+- `--microns-per-pixel`: Physical spacing in microns per pixel.
+- `--output`: CSV path for features.
 
-### Outputs
-- CSV containing per-column RNFL thickness (microns) plus mean/median.
-
-## Method notes
-- **Segmentation model**: U-Net (Ronneberger et al., 2015) or a heuristic edge-based detector.
-- **Thickness calculation**: For each A-scan (column), the RNFL thickness is computed as the vertical distance between the topmost and bottommost RNFL pixels in that column.
-
-## Glaucoma feature extraction pipeline (fundus + OCT)
-This section summarizes a full pipeline for common glaucoma-related features and points to places
-where pretrained models are often available. Because this environment cannot browse the web, the
-model sources are described at a high level so you can locate the latest checkpoints.
-
-### A) Fundus (en-face) features
-**Features to extract**
+## Feature outputs
+### Fundus (en-face)
 - Cup-to-disc ratio (CDR)
-- Neuro-retinal rim area / rim thickness
+- Neuro-retinal rim area / rim thickness (derived from disc/cup masks)
 - Disc area / cup area
 - Peripapillary vessel density / vessel tortuosity
-- RNFL defect patterns (wedge defects on en-face)
+- RNFL defect area
 
-**Suggested pipeline**
-1. **Optic disc/cup segmentation** (disc and cup masks).
-2. **Vessel segmentation** for density/tortuosity.
-3. **Compute features** from masks (areas, ratios, tortuosity).
-
-**Pretrained model options (typical sources)**
-- **Disc/cup segmentation**: U-Net/DeepLab/Mask R-CNN models trained on public datasets
-  (e.g., DRISHTI-GS, RIM-ONE, REFUGE).
-- **Vessel segmentation**: U-Net variants trained on fundus vessel datasets
-  (e.g., DRIVE, STARE, CHASE-DB1).
-
-### B) OCT B-scan features
-**Features to extract**
-- RNFL thickness (peripapillary)
-- GCC thickness (GCL + IPL)
-- ILM, RNFL, GCL, IPL, RPE layer boundaries
-- Rim width at Bruch’s membrane opening (BMO-MRW)
-- ONH morphology metrics
-
-**Suggested pipeline**
-1. **Retinal layer segmentation** (ILM, RNFL, GCL, IPL, RPE/BM).
-2. **Thickness computation** per A-scan for RNFL and GCC.
-3. **ONH/BMO detection** to compute BMO-MRW and rim metrics.
-
-**Pretrained model options (typical sources)**
-- **Retinal layer segmentation**: U-Net/FCN models from public OCT layer datasets
-  (e.g., Duke/BOE OCT, AROD, RETOUCH where applicable).
-- **ONH/BMO detection**: models trained on optic nerve head OCT datasets; some research
-  pipelines provide pretrained weights and evaluation scripts.
-
-### Output feature list (examples)
-- CDR = cup area / disc area
-- Rim area = disc area − cup area
-- Vessel density = vessel pixels / peripapillary ROI area
-- RNFL thickness profile (microns) and summary stats
-- GCC thickness profile (microns) and summary stats
-- BMO-MRW (minimum rim width)
+### OCT B-scan
+- RNFL thickness (mean/median)
+- GCC thickness (mean/median, from GCL + IPL)
+- ILM/RNFL/GCL/IPL/RPE boundaries used for thickness calculation
+- BMO-MRW (if BMO points provided)
 
 ## Reference
 - Ronneberger, O., Fischer, P., & Brox, T. (2015). U-Net: Convolutional Networks for Biomedical Image Segmentation.
